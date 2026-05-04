@@ -29,7 +29,7 @@ A simple usage example for using the high level API:
 
 ```dart
 import 'dart:io';
-import 'package:enough_mail/enough_mail.dart';
+import 'package:enough_mail_plus/enough_mail.dart';
 
 String userName = 'user.name';
 String password = 'password';
@@ -117,7 +117,7 @@ A simple usage example for using the low level API:
 
 ```dart
 import 'dart:io';
-import 'package:enough_mail/enough_mail.dart';
+import 'package:enough_mail_plus/enough_mail.dart';
 
 String userName = 'user.name';
 String password = 'password';

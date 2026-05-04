@@ -4,8 +4,8 @@
 import 'dart:async';
 import 'dart:io' show Platform;
 
-import 'package:enough_mail/enough_mail.dart';
-import 'package:enough_mail/src/private/util/client_base.dart';
+import 'package:enough_mail_plus/enough_mail.dart';
+import 'package:enough_mail_plus/src/private/util/client_base.dart';
 import 'package:test/test.dart';
 
 import '../mock_socket.dart';
