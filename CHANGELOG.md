@@ -1,3 +1,7 @@
+# 2.2.4
+* Fix: O(n²) performance bug in `MailCodec.wrapText()`. `text.runes.elementAt(i)` inside a loop caused `buildMimeMessage()` to take ~34s for a 100KB body. Now completes in <1s.
+* Test: Add performance regression test for `buildMimeMessage()` with 100KB body.
+
 # 2.2.3
 * Chore: Shorten package description to 60-180 characters for pub.dev score
 * Docs: Add example file (example/example.dart)
