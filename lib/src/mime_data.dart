@@ -118,7 +118,7 @@ class TextMimeData extends MimeData {
 
   /// Normalizes bare LF to CRLF for RFC 5322 compliance.
   static String _normalizeLineEndings(String text) =>
-      text.replaceAll(RegExp(r'(?<!\r)\n'), '\r\n');
+      text.replaceAll('\r\n', '\n').replaceAll('\n', '\r\n');
 
   /// The text representation of the full mime data
   final String text;
