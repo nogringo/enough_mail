@@ -1,4 +1,4 @@
-name: enough_mail
+name: enough_mail_plus
 description: "enough_mail - IMAP, POP3, SMTP email library with high/low-level APIs and MIME parsing"
 version: 2.2.4
 repository: https://github.com/nogringo/enough_mail
