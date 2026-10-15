@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import '../../codecs/date_codec.dart';
 import '../../codecs/mail_codec.dart';
 import '../../imap/message_sequence.dart';
@@ -120,10 +122,15 @@ class FetchParser extends ResponseParser<FetchImapResult> {
     for (var i = 0; i < children.length; i++) {
       final child = children[i];
       final hasNext = i < children.length - 1;
-      switch (child.value) {
+      final childValue = child.value;
+      // a partial fetch response is named e.g. BODY[]<0> or BODY[1]<1024>
+      final key = childValue != null && childValue.startsWith('BODY[')
+          ? _removePartialRange(childValue)
+          : childValue;
+      switch (key) {
         case 'UID':
           if (hasNext) {
-            message.uid = int.parse(children[i + 1].value ?? '-1');
+            message.uid = int.tryParse(children[i + 1].value ?? '');
             i++;
           }
           break;
@@ -136,9 +143,10 @@ class FetchParser extends ResponseParser<FetchImapResult> {
           }
           break;
         case 'FLAGS':
-          message.flags = List.from(
-            child.children?.map<String?>((flag) => flag.value) ?? <String>[],
-          );
+          message.flags = [
+            for (final flag in child.children ?? <ImapValue>[])
+              if (flag.value != null) flag.value!,
+          ];
           break;
         case 'INTERNALDATE':
           if (hasNext) {
@@ -148,7 +156,7 @@ class FetchParser extends ResponseParser<FetchImapResult> {
           break;
         case 'RFC822.SIZE':
           if (hasNext) {
-            message.size = int.parse(children[i + 1].value ?? '-1');
+            message.size = int.tryParse(children[i + 1].value ?? '');
             i++;
           }
           break;
@@ -221,13 +229,12 @@ class FetchParser extends ResponseParser<FetchImapResult> {
           break;
 
         default:
-          final value = child.value;
           if (hasNext &&
-              value != null &&
-              value.startsWith('BODY[') &&
-              value.endsWith(']')) {
+              key != null &&
+              key.startsWith('BODY[') &&
+              key.endsWith(']')) {
             i++;
-            _parseBodyPart(message, value, children[i]);
+            _parseBodyPart(message, key, children[i]);
           } else {
             print(
               'fetch: encountered unexpected/unsupported element '
@@ -236,6 +243,16 @@ class FetchParser extends ResponseParser<FetchImapResult> {
           }
       }
     }
+  }
+
+  /// Removes the `<offset>` suffix of a partial fetch item like `BODY[1]<0>`
+  static String _removePartialRange(String value) {
+    if (!value.endsWith('>')) {
+      return value;
+    }
+    final index = value.lastIndexOf('<');
+
+    return index == -1 ? value : value.substring(0, index);
   }
 
   /// Parse a body part
@@ -272,18 +289,66 @@ class FetchParser extends ResponseParser<FetchImapResult> {
   }
 
   void _parseBodyFull(MimeMessage message, ImapValue bodyValue) {
-    //print("Parsing BODY[]\n[${bodyValue.value}]");
     final data = bodyValue.data;
     final value = bodyValue.value;
     if (data != null) {
-      message.mimeData = BinaryMimeData(data, containsHeader: true);
+      // Normalise line endings to CRLF before parsing. Some IMAP servers
+      // preserve the original message's bare-LF line endings; the MIME parser
+      // only recognises \r\n\r\n as the header/body separator, so without
+      // normalisation the body is silently discarded.
+      //
+      // Done on the *bytes*. Decoding to a String first needs a charset, and
+      // the only one that can be assumed here is wrong: a message declares its
+      // charset per part, in headers this has not parsed yet. Running the
+      // literal through `Utf8Decoder(allowMalformed: true)` — which is what
+      // this did — turns every byte of a windows-1252 or latin-1 body into
+      // U+FFFD before the part's own `charset=` is ever read, so `Teší ma`
+      // arrived as `Te ma` and no later decode could recover it.
+      message.mimeData = BinaryMimeData(
+        _normaliseLineEndings(data),
+        containsHeader: true,
+      );
     } else if (value != null) {
       message.mimeData = TextMimeData(value, containsHeader: true);
-      //print("Parsing BODY text \n$bodyText");
     }
     // ensure all headers are set:
     message.parse();
   }
+
+  static const int _cr = 13;
+  static const int _lf = 10;
+
+  /// Gives every bare LF in [data] the CR the MIME parser expects, leaving
+  /// every other byte exactly as the server sent it.
+  ///
+  /// Returns [data] itself when there is nothing to do, which is the common
+  /// case — a conforming server sends CRLF already, and this runs over the
+  /// whole of every message body fetched.
+  static Uint8List _normaliseLineEndings(Uint8List data) {
+    var bareLineFeeds = 0;
+    for (var i = 0; i < data.length; i++) {
+      if (_isBareLineFeed(data, i)) {
+        bareLineFeeds++;
+      }
+    }
+    if (bareLineFeeds == 0) {
+      return data;
+    }
+
+    final out = Uint8List(data.length + bareLineFeeds);
+    var index = 0;
+    for (var i = 0; i < data.length; i++) {
+      if (_isBareLineFeed(data, i)) {
+        out[index++] = _cr;
+      }
+      out[index++] = data[i];
+    }
+
+    return out;
+  }
+
+  static bool _isBareLineFeed(Uint8List data, int i) =>
+      data[i] == _lf && (i == 0 || data[i - 1] != _cr);
 
   HeaderParseResult _parseBodyHeader(
     MimeMessage message,
@@ -363,7 +428,7 @@ class FetchParser extends ResponseParser<FetchImapResult> {
           grandchildren != null &&
           grandchildren.length > 1) {
         final parameters = grandchildren;
-        for (var i = 0; i < parameters.length; i += 2) {
+        for (var i = 0; i + 1 < parameters.length; i += 2) {
           body.contentType?.setParameter(
             parameters[i].value ?? '',
             parameters[i + 1].valueOrDataText ?? '',
@@ -386,7 +451,7 @@ class FetchParser extends ResponseParser<FetchImapResult> {
       ..contentType = ContentTypeHeader.from(mediaType);
     final contentTypeParameters = structures[2].children;
     if (contentTypeParameters != null && contentTypeParameters.length > 1) {
-      for (var i = 0; i < contentTypeParameters.length; i += 2) {
+      for (var i = 0; i + 1 < contentTypeParameters.length; i += 2) {
         final name = contentTypeParameters[i].value;
         final value = contentTypeParameters[i + 1].valueOrDataText;
         // print('content-type: $name=$value');
@@ -423,13 +488,13 @@ class FetchParser extends ResponseParser<FetchImapResult> {
       // example: <null>[attachment, <null>[filename, testImage.jpg,
       // modification-date, Fri, 27 Jan 2017 16:34:4 +0100, size, 13390]]
       final parts = structures[startIndex + 1].children ?? [];
-      if (parts[0].value != null) {
+      if (parts.isNotEmpty && parts[0].value != null) {
         final contentDisposition = ContentDispositionHeader(
           parts[0].value?.toLowerCase() ?? '',
         );
-        final parameters = parts[1].children;
+        final parameters = parts.length > 1 ? parts[1].children : null;
         if (parameters != null && parameters.length > 1) {
-          for (var i = 0; i < parameters.length; i += 2) {
+          for (var i = 0; i + 1 < parameters.length; i += 2) {
             final name = parameters[i].value;
             final value = parameters[i + 1].valueOrDataText;
             if (name != null && value != null) {

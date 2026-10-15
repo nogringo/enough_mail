@@ -9,6 +9,7 @@ import 'package:enough_mail_plus/src/mail_address.dart';
 import 'package:enough_mail_plus/src/media_type.dart';
 import 'package:enough_mail_plus/src/mime_message.dart';
 import 'package:test/test.dart';
+
 // cSpell:disable
 
 void main() {

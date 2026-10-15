@@ -3,6 +3,7 @@
 
 import 'dart:async';
 import 'dart:io' show Platform;
+import 'dart:typed_data';
 
 import 'package:enough_mail_plus/enough_mail.dart';
 import 'package:enough_mail_plus/src/private/util/client_base.dart';
@@ -218,6 +219,53 @@ void main() {
       '/',
       reason: 'different path separator than in server',
     );
+  });
+
+  test('ImapClient listMailboxes via LIST-STATUS preserves parentheses in '
+      'mailbox names', () async {
+    // Regression: with isExtended=true (LIST-STATUS return options), the
+    // extended-data parser did listDetails.indexOf('(') which found the '('
+    // inside "INBOX.Financial.Audit(s)" and treated 's)' as extended data.
+    // The path was truncated (removing the closing '"' too), so the
+    // subsequent quote-strip ate the 'i', leaving name='Aud' and a path
+    // that did not exist on the server.
+    mockServer.response =
+        '* LIST (\\HasChildren \\UnMarked) "." "INBOX.Financial.Audit(s)"\r\n'
+        '* STATUS "INBOX.Financial.Audit(s)" (MESSAGES 0 UNSEEN 0)\r\n'
+        '* LIST (\\HasNoChildren \\UnMarked) "." "INBOX.Financial.Home Hardware"\r\n'
+        '* STATUS "INBOX.Financial.Home Hardware" (MESSAGES 40 UNSEEN 0)\r\n'
+        '<tag> OK List completed (0.001 + 0.000 secs).';
+    final listResponse = await client.listMailboxes(
+      path: '"INBOX.Financial."',
+      recursive: false,
+      returnOptions: [
+        ReturnOption.status(['MESSAGES', 'UNSEEN']),
+        ReturnOption.children(),
+      ],
+    );
+    expect(listResponse, hasLength(2));
+
+    final audit = listResponse[0];
+    expect(
+      audit.name,
+      equals('Audit(s)'),
+      reason: 'name was truncated at "(" inside mailbox name',
+    );
+    expect(
+      audit.path,
+      equals('INBOX.Financial.Audit(s)'),
+      reason: 'path was truncated at "(" inside mailbox name',
+    );
+    expect(audit.hasChildren, isTrue);
+
+    final homeHardware = listResponse[1];
+    expect(
+      homeHardware.name,
+      equals('Home Hardware'),
+      reason: 'quoted name with space should be preserved',
+    );
+    expect(homeHardware.path, equals('INBOX.Financial.Home Hardware'));
+    expect(homeHardware.messagesExists, equals(40));
   });
 
   test('ImapClient LSUB', () async {
@@ -1172,6 +1220,35 @@ void main() {
     );
   });
 
+  test('ImapClient copy quotes a target path containing parentheses', () async {
+    // '(' and ')' are atom-specials (RFC 3501 section 9), so an unquoted
+    // `COPY 1:3 INBOX.Financial.Audit(s)` is rejected by servers with
+    // "BAD Invalid characters in atom". _encodeMailboxPath used to quote a
+    // path only when it contained a space.
+    await _selectInbox();
+    mockServer.response = '<tag> OK messages copied';
+    await client.copy(
+      MessageSequence.fromRange(1, 3),
+      targetMailboxPath: 'INBOX.Financial.Audit(s)',
+    );
+
+    expect(
+      mockServer.requests.last,
+      contains(' COPY 1:3 "INBOX.Financial.Audit(s)"'),
+    );
+  });
+
+  test('ImapClient copy encodes a non-ASCII target path', () async {
+    await _selectInbox();
+    mockServer.response = '<tag> OK messages copied';
+    await client.copy(
+      MessageSequence.fromRange(1, 3),
+      targetMailboxPath: 'Entwürfe',
+    );
+
+    expect(mockServer.requests.last, contains(' COPY 1:3 Entw&APw-rfe\r\n'));
+  });
+
   test('ImapClient uid copy', () async {
     await _selectInbox();
     mockServer.response =
@@ -1219,6 +1296,31 @@ void main() {
       12346,
     ]);
   });
+
+  test(
+    'ImapClient uid move does not encode the path of a target mailbox again',
+    () async {
+      // Mailbox.encodedPath is already modified UTF-7 (RFC 3501 section
+      // 5.1.3). Encoding it a second time turned the '&' that starts every
+      // non-ASCII run into '&-', so servers without UTF8=ACCEPT answered
+      // "NO [TRYCREATE]" for any mailbox with a non-ASCII name.
+      await _selectInbox();
+      mockServer.response =
+          '* LIST (\\HasNoChildren \\Trash) "/" "&BCMENAQwBDsEUQQ9BD0ESwQ1-"\r\n'
+          '<tag> OK LIST completed';
+      final trash = (await client.listMailboxes()).single;
+      mockServer.response = '<tag> OK UID MOVE completed';
+      await client.uidMove(
+        MessageSequence.fromRange(1, 3),
+        targetMailbox: trash,
+      );
+
+      expect(
+        mockServer.requests.last,
+        contains(' UID MOVE 1:3 "&BCMENAQwBDsEUQQ9BD0ESwQ1-"\r\n'),
+      );
+    },
+  );
 
   test('ImapClient store', () async {
     await _selectInbox();
@@ -1440,6 +1542,112 @@ void main() {
     expect(uidResponseCode?.targetSequence.toList().first, 176);
   });
 
+  test(
+    'ImapClient append with internalDate sends RFC 3501 date-time',
+    () async {
+      await _selectInbox();
+      final message = MessageBuilder.buildSimpleTextMessage(
+        const MailAddress('User Name', 'user.name@domain.com'),
+        [const MailAddress('Rita Recpient', 'rr@domain.com')],
+        'Hey,\r\nhow are things today?',
+        subject: 'Appended with a date',
+      );
+      mockServer.response =
+          '+ OK\r\n'
+          '<tag> OK [APPENDUID 1466002016 178] Append completed.';
+      final appendResponse = await client.appendMessage(
+        message,
+        flags: [r'\Seen'],
+        internalDate: DateTime.utc(2026, 1, 5, 10, 0, 0),
+      );
+
+      expect(
+        appendResponse.responseCodeAppendUid?.targetSequence.toList().first,
+        178,
+      );
+      expect(
+        mockServer.requests.join(),
+        contains(' APPEND "INBOX" (\\Seen) "05-Jan-2026 10:00:00 +0000" {'),
+      );
+    },
+  );
+
+  test(
+    'ImapClient append with a non-UTC internalDate is sent in UTC',
+    () async {
+      await _selectInbox();
+      mockServer.response =
+          '+ OK\r\n'
+          '<tag> OK [APPENDUID 1466002016 179] Append completed.';
+      await client.appendMessageText(
+        'Subject: tz\r\n\r\nbody',
+        internalDate: DateTime.utc(2026, 6, 30, 23, 30).toLocal(),
+      );
+
+      expect(
+        mockServer.requests.join(),
+        contains(' APPEND "INBOX" "30-Jun-2026 23:30:00 +0000" {'),
+      );
+    },
+  );
+
+  test(
+    'ImapClient append does not encode the path of a target mailbox again',
+    () async {
+      await _selectInbox();
+      mockServer.response =
+          '* LIST (\\HasNoChildren \\Sent) "/" "&BB4EQgQ,BEAEMAQyBDsENQQ9BD0ESwQ1-"\r\n'
+          '<tag> OK LIST completed';
+      final sent = (await client.listMailboxes()).single;
+      mockServer.response =
+          '+ OK\r\n'
+          '<tag> OK [APPENDUID 1466002016 180] Append completed.';
+      await client.appendMessageText(
+        'Subject: sent\r\n\r\nbody',
+        flags: [r'\Seen'],
+        targetMailbox: sent,
+      );
+
+      expect(
+        mockServer.requests.join(),
+        contains(' APPEND "&BB4EQgQ,BEAEMAQyBDsENQQ9BD0ESwQ1-" (\\Seen) {'),
+      );
+    },
+  );
+
+  // appendMessageText sends its literal through the socket's default UTF-8
+  // IOSink.write: fine for genuine text, but a byte outside 7-bit ASCII
+  // comes back out re-encoded as two bytes on the wire, corrupting an
+  // already-encoded MIME source and desyncing the `{n}` byte count declared
+  // in the command line from what is actually sent. appendMessageBytes
+  // exists for exactly that case and must reach the wire unchanged.
+  test('ImapClient appendMessageBytes sends raw bytes unchanged, including '
+      'a byte outside 7-bit ASCII', () async {
+    await _selectInbox();
+    final rawBytes = Uint8List.fromList([
+      ...'Subject: raw\r\n\r\n'.codeUnits,
+      0xE9, // outside ASCII: would double-encode if routed through UTF-8.
+      0x41,
+    ]);
+    mockServer.response =
+        '+ OK\r\n'
+        '<tag> OK [APPENDUID 1466002016 177] Append completed.';
+    final appendResponse = await client.appendMessageBytes(
+      rawBytes,
+      targetMailboxPath: 'INBOX',
+    );
+
+    expect(
+      appendResponse.responseCodeAppendUid?.targetSequence.toList().first,
+      177,
+    );
+    final sent = mockServer.requests.join();
+    expect(sent, contains(' APPEND INBOX {${rawBytes.length}}\r\n'));
+    // The mock maps each received byte to one code unit, so a byte that
+    // had been re-encoded as UTF-8 would show up here as two characters.
+    expect(sent, endsWith(String.fromCharCodes([...rawBytes, 13, 10])));
+  });
+
   test('ImapClient idle', () async {
     final box = await _selectInbox();
     expungedMessages = [];
@@ -1531,6 +1739,45 @@ void main() {
     expect(quotaResult.resourceLimits[1].name, 'MESSAGES');
     expect(quotaResult.resourceLimits[1].currentUsage, 0);
     expect(quotaResult.resourceLimits[1].usageLimit, 5000);
+  });
+
+  test('ImapClient namespace', () async {
+    mockServer.response =
+        '* NAMESPACE (("" "/")) NIL (("#shared/" "/")("#public/" "/"))\r\n'
+        '<tag> OK NAMESPACE completed';
+    final result = await client.namespace();
+    expect(result, isNotNull);
+    expect(result!.personal.length, 1);
+    expect(result.personal[0].prefix, '');
+    expect(result.personal[0].delimiter, '/');
+    expect(result.otherUsers, isEmpty);
+    expect(result.shared.length, 2);
+    expect(result.shared[0].prefix, '#shared/');
+    expect(result.shared[1].prefix, '#public/');
+    expect(result.shared[1].delimiter, '/');
+  });
+
+  test('ImapClient namespace with a literal prefix', () async {
+    mockServer.response =
+        '* NAMESPACE (("" "/")) NIL (({8}\r\n'
+        '#shared/ "/"))\r\n'
+        '<tag> OK NAMESPACE completed';
+    final result = await client.namespace();
+    expect(result, isNotNull);
+    expect(result!.shared.length, 1);
+    expect(result.shared[0].prefix, '#shared/');
+    expect(result.shared[0].delimiter, '/');
+  });
+
+  test('ImapClient namespace without a NAMESPACE response', () async {
+    mockServer.response = '<tag> OK completed';
+    final result = await client.namespace();
+    expect(result, isNull);
+  });
+
+  test('ImapClient namespace not supported', () async {
+    mockServer.response = '<tag> BAD Unknown command';
+    expect(client.namespace(), throwsA(isA<ImapException>()));
   });
 
   test('ImapClient getquota', () async {
