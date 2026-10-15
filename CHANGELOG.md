@@ -1,4 +1,4 @@
-# 2.2.4
+# 2.3.0
 * Feat: Support the IMAP `NAMESPACE` extension ([RFC 2342](https://datatracker.ietf.org/doc/html/rfc2342)): `ImapClient.namespace()` returns the personal, other users' and shared namespaces with their prefixes, hierarchy delimiters and response extensions; `ImapServerInfo.supportsNamespace` tells whether the server advertises it.
 * Security: `MailClient` refuses to authenticate over an unencrypted connection unless `SocketType.plainNoStartTls` is chosen explicitly; a missing STARTTLS capability no longer causes a silent clear-text fallback, and capabilities announced before STARTTLS are discarded.
 * Security: SMTP DATA applies RFC 5321 transparency to every line, so message content can no longer terminate the DATA phase early and inject commands.
@@ -21,9 +21,11 @@
 * Fix: `UsernameType.emailLocalPart` returns the local part; secure random Message-IDs; exact plus-alias matching; a working DKIM signer.
 * Fix: a reply that was received only partially when a connection was lost no longer corrupts the parsing of the replies after a reconnect.
 * Fix: non-ASCII display names are rendered as bare RFC 2047 encoded-words restricted to the characters allowed in a phrase instead of being placed inside a quoted-string; encoded words are labelled `UTF-8`.
+* Fix: replace the slow lookbehind regex in `TextMimeData` line ending normalisation with plain string replacements.
+
+# 2.2.4
 * Fix: O(n²) performance bug in `MailCodec.wrapText()`. `text.runes.elementAt(i)` inside a loop caused `buildMimeMessage()` to take ~34s for a 100KB body. Now completes in <1s.
 * Test: Add performance regression test for `buildMimeMessage()` with 100KB body.
-* Fix: replace the slow lookbehind regex in `TextMimeData` line ending normalisation with plain string replacements.
 
 # 2.2.3
 * Chore: Shorten package description to 60-180 characters for pub.dev score
